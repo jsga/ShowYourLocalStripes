@@ -1,0 +1,60 @@
+name: PR health check
+
+on: [pull_request]
+
+env:
+  CLUSTER_NAME: avatar-cluster
+  NAMESPACE: backend-stripes
+  REGISTRY: avatar-registry
+  REPO_NAME: backend-stripes
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Service containers to run with `container-job`
+    services:
+      # Label used to access the service container
+      postgres:
+        # Docker Hub image
+        image: postgres
+        # Provide the password for postgres
+        env:
+          POSTGRES_PASSWORD: climate
+          POSTGRES_USER: climate
+          POSTGRES_DB: climatedb
+        ports:
+          - 5432:5432
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install SOPS binary
+        uses: mdgreenwald/mozilla-sops-action@v1.1.0
+        with:
+          version: v3.7.3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Build container image
+        run: docker build -t registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest --file backend/Dockerfile --target prod backend/
+
+      - name: Run lint
+        env:
+          DB_HOST: localhost
+        run: |
+          docker run  registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest flake8
+
+      - name: Run tests
+        env:
+          DB_HOST: localhost
+        run: |
+          docker run  --network="host" registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest pytest
+

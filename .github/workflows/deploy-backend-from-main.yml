@@ -1,0 +1,113 @@
+name: Development Integration
+
+on:
+  push:
+    branches:
+      - main
+    #   - deploy-k8
+
+# Used for testing on a branch
+# on: [pull_request]
+
+env:
+  CLUSTER_NAME: avatar-cluster
+  NAMESPACE: backend-stripes
+  REGISTRY: avatar-registry
+  REPO_NAME: backend-stripes
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Service containers to run with `container-job`
+    services:
+      # Label used to access the service container
+      postgres:
+        # Docker Hub image
+        image: postgres
+        # Provide the password for postgres
+        env:
+          POSTGRES_PASSWORD: climate
+          POSTGRES_USER: climate
+          POSTGRES_DB: climatedb
+        ports:
+          - 5432:5432
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install SOPS binary
+        uses: mdgreenwald/mozilla-sops-action@v1.1.0
+        with:
+          version: v3.7.3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Build container image
+        run: docker build -t registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest --file backend/Dockerfile --target prod backend/
+      
+      - name: Run lint
+        env:
+          DB_HOST: localhost
+        run: |
+          docker run  registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest flake8
+
+      - name: Run tests
+        env:
+          DB_HOST: localhost
+        run: |
+          docker run  --network="host" registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest pytest
+
+      - name: Log in to DigitalOcean Container Registry with short-lived credentials
+        run: doctl registry login --expiry-seconds 1600
+      
+      - name: Update Docker settings
+        run: |
+          sudo sed -i 's/ }/, \"max-concurrent-uploads\": 2 }/' /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - name: Push image to DigitalOcean Container Registry
+        run: docker push registry.digitalocean.com/${{ env.REGISTRY }}/${{ env.REPO_NAME }}:latest
+
+      - name: Clean registry to save space, use only latest
+        run: yes | doctl registry garbage-collection start --include-untagged-manifests --force
+
+      - name: Save DigitalOcean kubeconfig with short-lived credentials
+        run: doctl kubernetes cluster kubeconfig save --expiry-seconds 600 ${{env.CLUSTER_NAME}}
+
+      - name: Define secrets in cluster
+        run: |
+          kubectl delete secret stripesbackendsecret --namespace ${{env.NAMESPACE}} --ignore-not-found
+          echo ${{secrets.SOPS_AGE_KEY_PRIVATE}} > keys_tmp.txt
+          export SOPS_AGE_KEY_FILE=$(pwd)/keys_tmp.txt
+          sops exec-file --input-type dotenv --output-type dotenv backend/prod.env.encrypted "kubectl create secret generic stripesbackendsecret --from-env-file={} --namespace=${{env.NAMESPACE}}"
+
+      - name: Deploy to DigitalOcean Kubernetes
+        run: kubectl apply -f $GITHUB_WORKSPACE/backend/deploy/deployment_backend_api.yml
+
+      - name: Notify slack success
+        if: success()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        uses: voxmedia/github-action-slack-notify-build@v1
+        with:
+          channel: showyourlocalstripes-alerts
+          status: SUCCESS
+          color: good
+
+      - name: Notify slack fail
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        uses: voxmedia/github-action-slack-notify-build@v1
+        with:
+          channel: showyourlocalstripes-alerts
+          status: FAILED
+          color: danger
