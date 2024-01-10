@@ -2,6 +2,7 @@ import base64
 import io
 import textwrap
 from collections import defaultdict
+from datetime import datetime
 
 import aiohttp
 import matplotlib as mpl
@@ -126,11 +127,13 @@ async def group_by_year(years: list, temps: list) -> tuple[list, list]:
 
 
 async def fetch_weather_data(lat: float, lon: float) -> tuple[list[int], list[float]]:
+    today_date = datetime.today().strftime("%Y-%m-%d")
+
     METEO_URL = (
         "https://archive-api.open-meteo.com/v1/archive?"
         f"latitude={lat}"
         f"&longitude={lon}"
-        "&start_date=1940-01-01&end_date=2023-05-08&models=best_match"
+        f"&start_date=1940-01-01&end_date={today_date}&models=best_match"
         "&daily=temperature_2m_mean&timezone=Europe%2FBerlin"
     )
 
